@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connexion - Aviator</title>
+    <style>
+        body { background-color: #191919; color: #FFFFFF; font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        .form-container { background: #333; padding: 20px; border-radius: 5px; }
+        input { margin: 10px 0; padding: 8px; width: 200px; }
+        button { background-color: #FF0000; color: #FFFFFF; padding: 10px; border: none; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <h2>Connexion</h2>
+        <form method="post">
+            {% csrf_token %}
+            {{ form.as_p }}
+            <button type="submit">Se connecter</button>
+        </form>
+        <p><a href="{% url 'register' %}" style="color: #FFFF00;">S'inscrire</a></p>
+    </div>
+</body>
+</html>

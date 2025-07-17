@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Jeu Aviator</title>
+    <style>
+        body {
+            background-color: #191919;
+            color: #FFFFFF;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        #game-container {
+            position: relative;
+            width: 1200px;
+            height: 600px;
+        }
+        #game-canvas {
+            border: 2px solid #FFFFFF;
+            background-color: #87CEEB;
+        }
+        #balance, #bet, #status, #history, #crash-info, #potential {
+            position: absolute;
+            color: #FFFFFF;
+            font-size: 20px;
+        }
+        #balance { top: 10px; left: 10px; }
+        #bet { top: 50px; left: 10px; }
+        #status { bottom: 50px; left: 10px; }
+        #history { top: 70px; left: 250px; }
+        #crash-info { bottom: 80px; left: 10px; }
+        #potential { top: 50%; left: 50%; transform: translate(-50%, 30px); color: #FFFF00; }
+        #multiplier {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 30px;
+            color: #00FF00;
+        }
+        #bet-input {
+            position: absolute;
+            top: 80px;
+            left: 10px;
+            background: transparent;
+            border: 1px solid #FFFF00;
+            color: #FFFF00;
+            font-size: 20px;
+        }
+        #stop-button {
+            position: absolute;
+            bottom: 100px;
+            right: 300px;
+            padding: 10px 20px;
+            background-color: #FF0000;
+            color: #FFFFFF;
+            border: none;
+            cursor: pointer;
+            font-size: 20px;
+        }
+        #logout {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: #FFFF00;
+        }
+        #loading {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            color: #FFFF00;
+        }
+    </style>
+</head>
+<body>
+    {% csrf_token %}
+    <div id="game-container">
+        <canvas id="game-canvas" width="1200" height="600"></canvas>
+        <div id="balance">Solde : {{ balance|floatformat:2|default:"10000.00" }} F CFA</div>
+        <div id="bet">Mise : 0.00 F CFA</div>
+        <div id="status"></div>
+        <div id="history">Historique : {% if history %}{{ history|join:", " }}x{% else %}Aucun{% endif %}</div>
+        <div id="crash-info"></div>
+        <div id="multiplier"></div>
+        <div id="potential"></div>
+        <input id="bet-input" type="text" placeholder="Mise ici" style="display: none;">
+        <button id="stop-button" style="display: none;">Arrêter</button>
+        <a id="logout" href="{% url 'logout' %}">Déconnexion</a>
+        <div id="loading">Mise à jour en cours...</div>
+    </div>
+    <script>
+        // Initialisation des données du jeu avec gestion des erreurs
+        window.gameData = (function() {
+            try {
+                const balance = {{ balance|default:"10000" }};
+                const history = [{% for h in history %}{{ h|floatformat:2|default:"0" }}{% if not forloop.last %},{% endif %}{% endfor %}].map(h => parseFloat(h) || 0);
+                const updateGameStateUrl = "{% url 'update_game_state' %}";
+                const csrfToken = "{{ csrf_token|default:'' }}";
+
+                return {
+                    balance: isNaN(parseFloat(balance)) ? 10000 : parseFloat(balance),
+                    history: history,
+                    updateGameStateUrl: updateGameStateUrl,
+                    csrfToken: csrfToken
+                };
+            } catch (e) {
+                console.error('Erreur lors de l\'initialisation de gameData :', e);
+                return {
+                    balance: 10000,
+                    history: [],
+                    updateGameStateUrl: "{% url 'update_game_state' %}",
+                    csrfToken: ""
+                };
+            }
+        })();
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // Fonction pour obtenir le jeton CSRF
+            function getCsrfToken() {
+                const token = document.querySelector('[name=csrfmiddlewaretoken]');
+                return token ? token.value : window.gameData.csrfToken || '';
+            }
+
+            // Variables globales
+            let balance = window.gameData.balance;
+            let isUpdating = false;
+            const canvas = document.getElementById('game-canvas');
+            const ctx = canvas ? canvas.getContext('2d') : null;
+            const GAME_AREA_X = 250;
+            const GAME_AREA_Y = 100;
+            const GAME_AREA_WIDTH = 900;
+            const GAME_AREA_HEIGHT = 400;
+            const WHITE = '#FFFFFF';
+            const BLACK = '#191919';
+            const RED = '#FF0000';
+            const GREEN = '#00FF00';
+            const YELLOW = '#FFFF00';
+            const SKY_BLUE = '#87CEEB';
+            const CURVE_COLOR = '#FFFF00';
+
+            let betAmount = 0;
+            const initialBalance = 10000;
+            let multiplier = 1.0;
+            let gameState = 'betting';
+            let crashPoint = 0;
+            let nextCrashPoint = parseFloat((Math.random() * 19 + 1).toFixed(2));
+            let cashoutMultiplier = parseFloat((Math.random() * 19 + 1).toFixed(2));
+            let history = window.gameData.history;
+            let multiplierHistory = [];
+            let startTime = 0;
+            let lastStateChange = Date.now() / 1000;
+            const bettingDelay = 5;
+            const delayBetweenRounds = 7;
+            let airplanePos = [GAME_AREA_X, GAME_AREA_Y + GAME_AREA_HEIGHT - 50];
+            let betInputActive = true;
+            let betInputText = '';
+            let hasCashout = false;
+            let cashoutValue = 0;
+            let lastInputTime = Date.now() / 1000;
+
+            const balanceDiv = document.getElementById('balance');
+            const betDiv = document.getElementById('bet');
+            const statusDiv = document.getElementById('status');
+            const historyDiv = document.getElementById('history');
+            const crashInfoDiv = document.getElementById('crash-info');
+            const multiplierDiv = document.getElementById('multiplier');
+            const potentialDiv = document.getElementById('potential');
+            const betInput = document.getElementById('bet-input');
+            const stopButton = document.getElementById('stop-button');
+            const loadingDiv = document.getElementById('loading');
+
+            const airplaneImage = new Image();
+            airplaneImage.src = '/static/app/airplane.png';
+            const crashImage = new Image();
+            crashImage.src = '/static/app/crash.png';
+
+            function generateCashoutMultiplier() {
+                return parseFloat((Math.random() * 19 + 1).toFixed(2));
+            }
+
+            async function updateServerState(bet_amount, multiplier, winnings) {
+                if (isUpdating) return;
+                isUpdating = true;
+                loadingDiv.style.display = 'block';
+                try {
+                    const response = await fetch(window.gameData.updateGameStateUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRFToken': getCsrfToken()
+                        },
+                        body: JSON.stringify({ bet_amount, multiplier, winnings })
+                    });
+                    if (!response.ok) throw new Error(`Erreur HTTP ${response.status}`);
+                    const data = await response.json();
+                    if (data.balance !== undefined) {
+                        balance = parseFloat(data.balance);
+                    } else if (data.error) {
+                        console.error('Erreur serveur:', data.error);
+                        statusDiv.textContent = 'Erreur lors de la mise à jour. Réessayez.';
+                    }
+                } catch (error) {
+                    console.error('Erreur AJAX:', error.message);
+                    statusDiv.textContent = 'Erreur de connexion. Vérifiez votre réseau.';
+                } finally {
+                    isUpdating = false;
+                    loadingDiv.style.display = 'none';
+                }
+            }
+
+            function drawGame() {
+                if (!ctx) return;
+                ctx.fillStyle = BLACK;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = SKY_BLUE;
+                ctx.fillRect(GAME_AREA_X, GAME_AREA_Y, GAME_AREA_WIDTH, GAME_AREA_HEIGHT);
+                ctx.strokeStyle = WHITE;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(GAME_AREA_X, GAME_AREA_Y, GAME_AREA_WIDTH, GAME_AREA_HEIGHT);
+
+                if (multiplierHistory.length > 1) {
+                    ctx.beginPath();
+                    ctx.strokeStyle = CURVE_COLOR;
+                    ctx.lineWidth = 2;
+                    multiplierHistory.forEach(([t, m], i) => {
+                        const x = GAME_AREA_X + Math.min((t - startTime) * 50, GAME_AREA_WIDTH - 10);
+                        const y = Math.max(GAME_AREA_Y + 10, Math.min(GAME_AREA_Y + GAME_AREA_HEIGHT - 10, GAME_AREA_Y + GAME_AREA_HEIGHT - (parseFloat(m) * 10)));
+                        if (i === 0) ctx.moveTo(x, y);
+                        else ctx.lineTo(x, y);
+                    });
+                    ctx.stroke();
+                }
+
+                if (gameState === 'flying' && airplaneImage.complete && airplaneImage.naturalWidth !== 0) {
+                    ctx.drawImage(airplaneImage, airplanePos[0], airplanePos[1], 50, 50);
+                } else if (gameState === 'crashed' && crashImage.complete && crashImage.naturalWidth !== 0) {
+                    ctx.drawImage(crashImage, airplanePos[0], airplanePos[1], 50, 50);
+                } else {
+                    ctx.fillStyle = gameState === 'flying' ? '#0000FF' : RED;
+                    ctx.fillRect(airplanePos[0], airplanePos[1], 50, 50);
+                }
+            }
+
+            function updateUI() {
+                if (!balanceDiv || !betDiv || !statusDiv || !historyDiv || !crashInfoDiv || !multiplierDiv || !potentialDiv || !betInput || !stopButton || !loadingDiv) {
+                    console.error('Erreur : Un ou plusieurs éléments DOM sont introuvables.');
+                    return;
+                }
+                balanceDiv.textContent = `Solde : ${parseFloat(balance).toFixed(2)} F CFA`;
+                betDiv.textContent = `Mise : ${betAmount.toFixed(2)} F CFA`;
+                historyDiv.textContent = `Historique : ${history.length ? history.slice(-13).map(m => {
+                    const value = parseFloat(m);
+                    return isNaN(value) ? '0.00x' : `${value.toFixed(2)}x`;
+                }).join(', ') : 'Aucun'}`;
+
+                if (gameState === 'betting') {
+                    betInput.style.display = 'block';
+                    stopButton.style.display = 'none';
+                    statusDiv.textContent = `(départ dans ${(bettingDelay - (Date.now() / 1000 - lastStateChange)).toFixed(1)}s)...`;
+                    crashInfoDiv.textContent = `Prochain crash : ${nextCrashPoint.toFixed(2)}x`;
+                    multiplierDiv.textContent = '';
+                    potentialDiv.textContent = '';
+                    betInput.value = betInputText;
+                } else if (gameState === 'flying') {
+                    betInput.style.display = 'none';
+                    multiplierDiv.style.color = GREEN;
+                    multiplierDiv.textContent = `${multiplier.toFixed(2)}x`;
+                    statusDiv.textContent = `(Cible : ${cashoutMultiplier.toFixed(2)}x, Crash : ${crashPoint.toFixed(2)}x, Prochain crash : ${nextCrashPoint.toFixed(2)}x)`;
+                    if (betAmount > 0 && !hasCashout) {
+                        stopButton.style.display = 'block';
+                        potentialDiv.textContent = `Gain potentiel : ${(betAmount * multiplier).toFixed(2)} F CFA`;
+                    } else if (hasCashout) {
+                        statusDiv.textContent = 'Mise encaissée !';
+                        stopButton.style.display = 'none';
+                        potentialDiv.textContent = '';
+                    } else {
+                        stopButton.style.display = 'none';
+                        potentialDiv.textContent = '';
+                    }
+                } else if (gameState === 'crashed') {
+                    betInput.style.display = 'none';
+                    stopButton.style.display = 'none';
+                    multiplierDiv.style.color = RED;
+                    multiplierDiv.textContent = `${multiplier.toFixed(2)}x`;
+                    statusDiv.textContent = 'Nouveau tour dans 7s...';
+                    if (hasCashout) {
+                        crashInfoDiv.textContent = `Gains : ${(betAmount * cashoutValue).toFixed(2)} F CFA`;
+                    } else if (betAmount > 0) {
+                        crashInfoDiv.textContent = 'Perdu';
+                    } else {
+                        crashInfoDiv.textContent = '';
+                    }
+                    potentialDiv.textContent = '';
+                }
+            }
+
+            betInput.addEventListener('input', (e) => {
+                if (gameState === 'betting') {
+                    betInputText = e.target.value;
+                    lastInputTime = Date.now() / 1000;
+                }
+            });
+
+            stopButton.addEventListener('click', async () => {
+                if (gameState === 'flying' && !hasCashout && betAmount > 0) {
+                    const winnings = betAmount * multiplier;
+                    cashoutValue = multiplier;
+                    history.push(multiplier);
+                    hasCashout = true;
+                    await updateServerState(0, multiplier, winnings);
+                    betAmount = 0;
+                    updateUI();
+                }
+            });
+
+            async function gameLoop() {
+                const currentTime = Date.now() / 1000;
+
+                if (gameState === 'betting') {
+                    if (balance <= 0) {
+                        balance = initialBalance;
+                        await updateServerState(0, 0, initialBalance);
+                        betInputText = '';
+                        betInputActive = true;
+                        lastInputTime = currentTime;
+                    }
+                    if (betInputActive && betInputText && currentTime - lastInputTime >= inputDelay) {
+                        const newBet = parseFloat(betInputText);
+                        if (!isNaN(newBet) && newBet > 0 && newBet <= balance) {
+                            betAmount = newBet;
+                            await updateServerState(betAmount, 0, 0);
+                            betInputActive = false;
+                            gameState = 'flying';
+                            multiplier = 1.0;
+                            crashPoint = nextCrashPoint;
+                            cashoutMultiplier = generateCashoutMultiplier();
+                            nextCrashPoint = cashoutMultiplier;
+                            startTime = currentTime;
+                            lastStateChange = currentTime;
+                            multiplierHistory = [[currentTime, 1.0]];
+                            airplanePos = [GAME_AREA_X, GAME_AREA_Y + GAME_AREA_HEIGHT - 50];
+                            hasCashout = false;
+                            cashoutValue = 0;
+                            betInputText = '';
+                        }
+                    }
+                    if (currentTime - lastStateChange >= bettingDelay && betInputActive) {
+                        gameState = 'flying';
+                        multiplier = 1.0;
+                        crashPoint = nextCrashPoint;
+                        cashoutMultiplier = generateCashoutMultiplier();
+                        nextCrashPoint = cashoutMultiplier;
+                        startTime = currentTime;
+                        lastStateChange = currentTime;
+                        multiplierHistory = [[currentTime, 1.0]];
+                        airplanePos = [GAME_AREA_X, GAME_AREA_Y + GAME_AREA_HEIGHT - 50];
+                        hasCashout = false;
+                        cashoutValue = 0;
+                        betInputActive = false;
+                        betInputText = '';
+                    }
+                } else if (gameState === 'flying') {
+                    const elapsedTime = currentTime - startTime;
+                    multiplier = parseFloat((0.05 * elapsedTime ** 2 + 0.3 * elapsedTime + 1.0).toFixed(2));
+                    multiplierHistory.push([currentTime, multiplier]);
+                    airplanePos[0] = Math.min(GAME_AREA_X + (elapsedTime * 50), GAME_AREA_X + GAME_AREA_WIDTH - 50);
+                    airplanePos[1] = Math.max(GAME_AREA_Y + 10, Math.min(GAME_AREA_Y + GAME_AREA_HEIGHT - 50, GAME_AREA_Y + GAME_AREA_HEIGHT - (multiplier * 10)));
+                    if (multiplier >= crashPoint) {
+                        history.push(multiplier);
+                        await updateServerState(betAmount, multiplier, 0);
+                        gameState = 'crashed';
+                        lastStateChange = currentTime;
+                    }
+                } else if (gameState === 'crashed') {
+                    if (currentTime - lastStateChange >= delayBetweenRounds) {
+                        gameState = 'betting';
+                        betInputActive = true;
+                        betInputText = '';
+                        betAmount = 0;
+                        lastStateChange = currentTime;
+                        lastInputTime = currentTime;
+                    }
+                }
+
+                drawGame();
+                updateUI();
+                requestAnimationFrame(gameLoop);
+            }
+
+            // Démarrer le jeu uniquement si le DOM est chargé et le canvas disponible
+            if (canvas && ctx) {
+                gameLoop();
+            } else {
+                console.error('Erreur : Canvas ou contexte 2D non disponible.');
+                statusDiv.textContent = 'Erreur : Impossible d\'initialiser le jeu.';
+            }
+        });
+    </script>
+</body>
+</html>
